@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package protobuf;
+
+option go_package = "../proto";
+
+message Command {
+  // NOTE: I am purposefully separating the command from the arguments even
+  // though I could easily passthrough the full arg string from the client. This
+  // is to better control the command authorization and ensure that the command
+  // going into the parameter (index 1) position of exec.CommandContext is less
+  // likely to lead to a command injection attack.
+  string command = 1;
+  repeated string args = 2;
+}
+
+message Process {
+  // The ID of the command. This is populated by the server and is used to
+  // identify the command so the client can query the status of the command.
+  int64 id = 1;
+}
+
+// This essentially mimics the os.ProcessState with the addition of the error
+// field which will contain any Go error message that was encountered during the
+// execution of the command.
+message Status {
+    int32 exitcode = 1;
+    bool exited = 2;
+    int64 pid = 3;
+    bool success = 4;
+    string error = 5;
+}
+
+message CommandOutput {
+    bytes data = 1;
+}
+
+service CommandService {
+
+  // NOTE: I decided to create three separate methods (one for each command) to
+  // keep from overloading the message types with an enumeration that performed
+  // different operations. This allows for a very EXPLICIT contract for the
+  // client to follow.
+  rpc Start(Command) returns (Process) {}
+  rpc Stop(Process) returns (Status) {}
+  rpc Stat(Process) returns (Status) {}
+
+  // I don't like the naming of the return stream here but I opted to go with a
+  // shortend command name and CommandOutput is self-describing though more
+  // verbose than I usually like.
+  rpc Output (Process) returns (stream CommandOutput) {}
+}
+
+
