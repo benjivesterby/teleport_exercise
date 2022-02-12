@@ -101,8 +101,8 @@ command and arguments to the subprocess.
 ### Exported API
 
 The API will be simple, abstracting away the complicated details of isolation
-and resource constraints. Each "E" (environment) variable can have any number of
-isolated processes with their own resource limits.
+and resource constraints. Each Box instance can have any number of isolated
+processes with their own resource limits.
 
 ```go
 package sandbox
