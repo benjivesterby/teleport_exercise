@@ -1,6 +1,3 @@
-# Ignore protobuf files
-*.pb.go
-
 # Binaries for programs and plugins
 *.exe
 *.exe~

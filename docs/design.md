@@ -1,11 +1,5 @@
 # Design Document
 
-## Styling
-
-For styling I will use the linter styling rules enforced by my golangci-lint
-config (`.golangci.yml`) which are opinionated, but consistent. For non-linter
-supported styling I use the [Go style guide](https://github.com/golang/go/wiki/CodeReviewComments).
-
 ## Expected Process Flow
 
 ![Process Flow Diagram](diagrams/processflow.svg)
@@ -20,6 +14,27 @@ When a client executes a start request, the library will generate a random ID
 and create cgroup folders for that ID under the parent PID. The cgroup files
 will then be updated with the resource constraints, and the helper process PID
 will be written to the cgroups.
+
+The helper on initialization will create a set of cgroups in the
+/sys/fs/proc/*/parentID/uniqueID/ directories. These would initially inherit the
+cgroups of the parent process which would be the default cgroups (primarily
+created to help manage the cgroup folders for sub-processes). After the cgroup
+creation the helper process will override the specific cgroup parameters
+indicated in the design with the hard-coded values. Then the helper will write
+its own PID into the tasks file of each cgroup (adding itself to the cgroups).
+After that it will create the sub-process `*exec.Cmd`, while passing the syscall
+flags for isolation and mapping the os.Stdin, os.Stdout, and os.Stderr to the
+sub-process `*exec.Cmd` corresponding fields.
+
+Random ID generation will use `crypto/rand` like this:
+
+```go
+id, _ := rand.Int(rand.Reader, big.NewInt(10000))
+```
+
+`crypto/rand` is used to ensure enough entropy so that there are not overlapping
+IDs. Usually I would use a UUID, but I believe the smaller number here will make
+it easier to test for the exercise.
 
 ### cgroup Configuration
 
@@ -40,6 +55,42 @@ will be written to the cgroups.
 **NOTE:** I am not configuring network connections for sub-processes in the
 exercise. No commands will have network access.
 
+#### About Isolation in the Linux Kernel
+
+Isolation flags tell the kernel to isolate the process into different
+namespaces, restricting the resources visible to the process.
+
+NEWUTS sets up the process with a hostname namespace. Initially it will match
+the parent process, but it can be changed once isolated without affecting the
+parent process.
+
+NEWPID isolates the process IDs so that they start over again without having
+visibility into any processes executing outside the namespace.
+
+NEWNS sets up the mount namespace and isolates mounting so that files can be
+mounted and unmounted without affecting the rest of the system. Initially a
+mount namespace will share the same mounts as the parent process, but those
+mounts can then be changed without affecting the parent process.
+
+NEWNET isolates the networking. The settings I'm using here will completely cut
+off all network access to the processes with the exception of the loopback. The
+networking can be re-connected by creating virtual eth devices but I wasn't
+planning on doing that in this exercise.
+
+One thing I'm not doing that could be more of a risk in a production environment
+where true isolation is desired is changing the root directory of a process.
+Remapping the root directory is important for proper isolation because it
+removes any views of the parent OS from the child process. I have chosen not to
+do that for this exercise so each process will have full $PATH access. If I were
+to change the root it would be necessary to provide a set of root directories
+(for example the filesystem for a linux distro like alpine) or create custom
+mounts to the host os.
+
+I'm also not isolating the users as part of these syscalls which would hide the
+user and group spaces so that none of the users and groups outside the namespace
+are visible. There are other namespaces I am not taking advantage of which
+further isolates a process from the host OS.
+
 ### Helper Binary
 
 This helper binary will be responsible for running the subprocess in isolation
@@ -54,23 +105,27 @@ and resource constraints. Each "E" (environment) variable can have any number of
 isolated processes with their own resource limits.
 
 ```go
-// Env will return an environment after creating the parent cgroups which
-// manages the processes within the library.
-func Env(context.Context) E
+package sandbox
 
-// E is the Environment type. I chose E as the name to reduce the overall
-// length of the name (and avoid duplicative naming). This can always be
-// updated to be more verbose, but the only exported method that will
-// supply it is the `Env` function which documents that it returns
-// an environment.
-type E struct {
+// New will return a sandbox environment after creating the parent cgroups which
+// manages the processes within the library.
+func New(context.Context) Box
+
+// Box will manage internal processes and resources. Each instance of Box will
+// have its own isolated cgroup and will be responsible for creating subprocesses
+// using the helper binary.
+type Box struct {
     // ... Unexported Fields
 }
 
-func (e *E) Start(cmd string, args...string) (id int, err error)
-func (e *E) Stop(id int) error
-func (e *E) Stat(id int) (*os.ProcessState, error)
-func (e *E) Output(id int) (io.Reader, error)
+func (b *Box) Start(cmd string, args...string) (id int, err error)
+
+// Stop will cancel the child context used to call the helper binary, the helper
+// binary will monitor for sigterm and will cancel the subprocess context.
+func (b *Box) Stop(id int) error
+
+func (b *Box) Stat(id int) (*os.ProcessState, error)
+func (b *Box) Output(id int) (io.ReaderAt, error)
 ```
 
 **TRADEOFF:** For simplicity I have chosen to merge the stdout and stderr into a
@@ -112,15 +167,15 @@ the [proto/api.proto](../proto/api.proto) file.
 ### API CLI
 
 The API will execute as a CLI process. The CLI will accept configuration
-information for hosting the gRPC service such as the host and port.
+information for hosting the gRPC service such as the host:port, certificate, and
+private key.
 
-**NOTE:** To simplify the CLI for the exercise I will embed the certificate
-and key in the binary using the `embed` package. This is *very* insecure and
-should **NEVER** be done.
+**NOTE:** The initial set of certificates will be stored in the git repository.
+This is *very* insecure and should **NEVER** be done.
 
 ```bash
 # Example CLI Usage
-server --host=localhost --port=8080
+server -host=localhost -port=8080 -cert=server.cert -key=server.key
 ```
 
 ### Available gRPC Commands
@@ -132,11 +187,12 @@ server --host=localhost --port=8080
 
 ### Streaming Output
 
-The library will propagate the output of the command to the API as an io.Reader.
-The API will then use a combination of `io.TeeReader` and `bytes.Buffer`
-stacking to create independent readers that can be used to stream the output to
-multiple clients without creating a race. These readers will be used to respond
-to clients through the Output stream in gRPC.
+The library will propagate the output of the command to the API as an
+io.ReaderAt. The io.ReaderAt documentation specifically states it should be
+implemented for parallel safe reads. The `*os.File` type implements the
+`io.ReaderAt` interface. Each caller requesting a `io.ReaderAt` instance will
+maintain it's own cursor position. This allows different callers to read from
+the begining of the output stream.
 
 ### Third Party Libraries
 
@@ -150,50 +206,158 @@ these libraries are required.
 
 ### Transport Security
 
-**NOTE:** Root and Private Key certificates will be embedded in this repository
+**NOTE:** CA and Private Key certificates will be embedded in this repository
 for the purposes of the exercise. This is bad practice and a serious security
 risk.
 
 ### Authentication
 
-Authentication will use mTLS as defined in the requirements. The cipher suite
-will follow recommendations from [SSL Labs](https://github.com/ssllabs/research/wiki/SSL-and-TLS-Deployment-Best-Practices#23-use-secure-cipher-suites).
+Authentication will use mTLS (TLS 1.3) as defined in the requirements. The
+cipher suite will follow recommendations from [SSL Labs](https://github.com/ssllabs/research/wiki/SSL-and-TLS-Deployment-Best-Practices#23-use-secure-cipher-suites).
 
-I will likely only include those cipher suites that correspond to the keys and
-certificates embedded in this repository.
+Here are the cipher suites that will be used:
+
+```go
+config := &tls.Config{
+  MinVersion:               tls.VersionTLS13, // TLS 1.3
+  RootCAs:                  caCertPool,
+  ClientCAs:                caCertPool,
+  ClientAuth:               tls.RequireAndVerifyClientCert,
+  Certificates:             []tls.Certificate{cert},
+  PreferServerCipherSuites: true, // Prefer server cipher suites
+  CipherSuites: []uint16{
+   // NOTE: Using GCM here instead of CBC at the recommendation of gosec
+   // Technically AES128 is still secure, but larger keysize is preferred
+   // Also, a larger key size may make a key more quantum resistant
+   tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+   tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+  },
+ }
+```
+
+Originally I intended to use TLS 1.2 as my minimum version but there is no
+reason not to use TLS 1.3 as my minimum version. Obviously, in a production
+environment, this may not be possible due to legacy 1.2 support.
+
+TLS 1.3 is faster and more secure so it makes sense as a minimum version for a
+new system.
+
+#### Certification Creation
+
+I will use a helper binary to create the certificates. This will be used to
+create the CA certificate and the client certificates. It will be hard-coded
+with a set of certificates for testing, including different organizations and
+units.
+
+Here is an example of a certificate setup:
+
+```go
+cert := &x509.Certificate{
+   SerialNumber:    serial,
+   Subject:         pkix.Name{
+                      Organization: []string{"it"},
+                      OrganizationalUnit: []string{
+                      "admin",
+                      "superadmin",
+                      },
+                      Country:       []string{"US"},
+                      Province:      []string{"Raleigh"},
+                      Locality:      []string{"North Carolina"},
+                      StreetAddress: []string{""},
+                      PostalCode:    []string{""},
+                    },
+   IPAddresses:     []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
+   NotBefore:       time.Now(),
+   NotAfter:        time.Now().AddDate(10, 0, 0),
+   SubjectKeyId:    []byte{1, 2, 3, 4, 6},
+   ExtKeyUsage:     []x509.ExtKeyUsage{
+                      x509.ExtKeyUsageClientAuth,
+                      x509.ExtKeyUsageServerAuth,
+                    },
+   KeyUsage:        x509.KeyUsageDigitalSignature,
+  }
+```
+
+#### Certificate Naming Convention
+
+The server certificate will be named simply `server.cert/key`. The CA
+certificates will be named `ca.cert/key`.
+
+To simplify certificate identification for the client CLI, the certificates will
+be named with the following convention:
+
+  `<org1-org2-orgN>_<unit1-unit2-unitN>.key/cert`
+
+`key` == private key
+`cert` == public key
+
+This naming convention will help with knowing which certificates are authorized
+for which commands as is detailed in the [Authorization](#authorization)
+section.
 
 ### Authorization
 
-There will be two authorized certificates for this exercise. The first will be a
-certificate that is authorized for FULL-`$PATH` access. The second will be a
-certificate that is authorized for a set of pre-defined commands. These commands
-will include `ls`, `echo`, `cat`, `ping`.
+Client authorization will use information embedded into the certificate. The
+information I will use in this exercise are the Organization and
+OrganizationUnit fields which will map to hard coded allowed commands in the
+API. The exception to this role system will be the `admin` role which will have
+access to all commands.
 
-Accessing these keyids will happen through the use of the `context.Context`
-retrieved from the gRPC library and extracted using
-`metadata.FromIncomingContext`.
+Key information will be accessed through the `context.Context` object propagated
+by the gRPC server.
+
+#### Example of getting TLS information from the context
+
+```go
+p, ok := peer.FromContext(ctx)
+if ok {
+tlsInfo := p.AuthInfo.(credentials.TLSInfo)
+ // Do something with tlsinfo here
+}
+```
+
+### Role Scheme
 
 This scheme will be enforced by an *allow-list* of commands hard-coded into the
-API via a `map[string]bool`.
+API via types like this:
+
+```go
+type Role map[string][]string // Role[unit] = []string{allowed_command}
+type Roles map[string]Role // Roles[org] = Role
+```
 
 **NOTE:** In a real-world scenario, this would be a more complex authorization
 scheme. For the purposes of this exercise, we will use a simple authorization
 scheme as defined in the requirements.
 
+### Hard Coded Roles for the Exercise
+
+|  Role | Commands |
+|-------|----------|
+| `it`: `admin` |  ALL Commands |
+| `it`: `user` | `ls`, `ps`, `cat`, `whoami`, `pwd` |
+| `hr`: `user` | `whoami`, `ls` |
+
 ## Client
 
 The client will be a simple CLI application that will interact with the API over
-gRPC. The commands will simply follow the same pattern as the API, with the
-exception of the necessary url and port information.
+gRPC. The commands will simply follow the same pattern as the API with flags for
+host:port, certificate, and private key. Following the flags, the client will
+provide the command and arguments to be executed.
 
-**NOTE:** To simplify the CLI for the exercise I will embed the certificate
-and key in the binary using the `embed` package. This is *very* insecure and
-should **NEVER** be done.
+**NOTE:** The initial set of certificates will be stored in the git repository.
+This is *very* insecure and should **NEVER** be done.
 
 ```bash
 # gRPC url config will be provided via environment variable for the exercise
 # to simplify the CLI.
 export GRCP_CONN=localhost:8080
+
+# Path to the certificate directory
+export CERTPATH=./certs
+
+# Certificate prefix of the user to assume the role of
+export ASSUME=it-admin
 
 # Example CLI Usage (Start)
 client start command arg1 arg2 ...
@@ -214,16 +378,35 @@ this for production.
 
 ## Reproducible Builds and CI/CD
 
-In order to ensure reproducible builds, this repository has a
-`.pre-commit-config.yaml` specificed for the `pre-commit` framework, as well as
-Github Actions to build and test the code on push. Ideally, there should never
-be a failure on a push because it should get caught by the pre-commit hooks.
+Package management for this application will use go modules to ensure that the
+build it reproducible. Execution of the `go mod init <module_name>` command will
+create a go.mod file that will be used to manage the dependencies of the
+application. For public repositories the `sum.golang.org` is used to ensure that
+the checksum values are correct. The values returned from `sum.golang.org` are
+stored in the `go.sum` file. To use a different checksum service, simply change
+`GOSUMDB` to point at the desired service.
 
-These pre-commit hooks also enforce code style and linting rules, and check for
+**NOTE:** For the purposes of this exercise, I will use the `sum.golang.org` and
+all dependencies will be public. The keeps me from having to setup `GOPRIVATE`
+and adding `insteadOf` configs for `git`.
+
+### Developer Environment Validation
+
+To ensure that builds are valid, tests are passing and linting passes prior to a
+push to Github the `pre-commit` framework will execute with the settings located
+in the `.pre-commit-config.yaml` file. These pre-commit hooks also check for
 embedded secrets.
 
 **NOTE:** There will be embedded secrets added to this repo and the
 detect-secrets baseline will be reset to account for those.
+
+### CI/CD
+
+A suite of Github actions will be included to verify builds and tests are
+passing for the different elements of the exercise. For the server and library
+the actions will be limited to running on a linux environment due to the need to
+access Linux only syscalls and features. For the client, the actions will run a
+matrix of different operating systems.
 
 ## Dependency Structure
 
@@ -236,7 +419,7 @@ indicate dependency direction.
 ## Additional Unsupported Features
 
 - No Shell / REPL Support
-- Limited to Single Connections ONLY
+- The Client will be limited to single connections ONLY
 - Hard Coded and Embedded Secrets
 - Limited to single running instances of a command
 - No included build tags (to limit os support)
