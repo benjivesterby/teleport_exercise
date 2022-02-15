@@ -215,7 +215,8 @@ risk.
 Authentication will use mTLS (TLS 1.3) as defined in the requirements. The
 cipher suite will follow recommendations from [SSL Labs](https://github.com/ssllabs/research/wiki/SSL-and-TLS-Deployment-Best-Practices#23-use-secure-cipher-suites).
 
-Here are the cipher suites that will be used:
+Here is an example TLS configuration for TLS 1.3. Go's default cipher suites
+will be used as they are secure and compliant.
 
 ```go
 config := &tls.Config{
@@ -225,13 +226,6 @@ config := &tls.Config{
   ClientAuth:               tls.RequireAndVerifyClientCert,
   Certificates:             []tls.Certificate{cert},
   PreferServerCipherSuites: true, // Prefer server cipher suites
-  CipherSuites: []uint16{
-   // NOTE: Using GCM here instead of CBC at the recommendation of gosec
-   // Technically AES128 is still secure, but larger keysize is preferred
-   // Also, a larger key size may make a key more quantum resistant
-   tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-   tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-  },
  }
 ```
 
@@ -248,6 +242,8 @@ I will use a helper binary to create the certificates. This will be used to
 create the CA certificate and the client certificates. It will be hard-coded
 with a set of certificates for testing, including different organizations and
 units.
+
+>Certificates will be RSA keys with a 4096 bit key length.
 
 Here is an example of a certificate setup:
 
