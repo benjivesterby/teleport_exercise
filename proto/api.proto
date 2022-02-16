@@ -20,15 +20,11 @@ message Process {
   int64 id = 1;
 }
 
-// This essentially mimics the os.ProcessState with the addition of the error
-// field which will contain any Go error message that was encountered during the
-// execution of the command.
+// This message indicates the status of the command and if the command
+// has exited provides the exit code.
 message Status {
     int32 exitcode = 1;
     bool exited = 2;
-    int64 pid = 3;
-    bool success = 4;
-    string error = 5;
 }
 
 message CommandOutput {

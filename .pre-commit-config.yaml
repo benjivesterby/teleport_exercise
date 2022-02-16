@@ -19,8 +19,8 @@ repos:
     rev: v4.0.1
     hooks:
     -   id: check-json
-    -   id: check-added-large-files
-    -   id: pretty-format-json
+    # -   id: check-added-large-files
+    # -   id: pretty-format-json
     -   id: check-merge-conflict
     -   id: check-yaml
 -   repo: https://github.com/igorshubovych/markdownlint-cli

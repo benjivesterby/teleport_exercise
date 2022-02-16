@@ -1,3 +1,3 @@
-module github.com/benjivesterby/teleport_exercise
+module go.benjiv.com/sandbox
 
 go 1.17
