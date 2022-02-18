@@ -1,0 +1,25 @@
+{
+    "folders": {
+        "memory": {
+            "files": {
+                "memory.limit_in_bytes": [
+                    "209715200"
+                ]
+            }
+        },
+        "cpu,cpuacct": {
+            "files": {
+                "cpu.cfs_quota_us": [
+                    "100000"
+                ]
+            }
+        },
+        "blkio": {
+            "files": {
+                "blkio.throttle.write_bps_device": [
+                    "8: 0 10485760"
+                ]
+            }
+        }
+    }
+}

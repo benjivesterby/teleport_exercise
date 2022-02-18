@@ -107,25 +107,42 @@ processes with their own resource limits.
 ```go
 package sandbox
 
-// New will return a sandbox environment after creating the parent cgroups which
-// manages the processes within the library.
+// New returns a sandbox environment after creating the parent
+// cgroups which manages the processes within the library.
 func New(context.Context) Box
 
-// Box will manage internal processes and resources. Each instance of Box will
-// have its own isolated cgroup and will be responsible for creating subprocesses
-// using the helper binary.
+// Box manages an internal collection of processes and resources.
+// Each instance of Box has its own isolated cgroup and is
+// responsible for creating subprocesses using the helper binary.
 type Box struct {
     // ... Unexported Fields
 }
 
+// Start executes the commands in the sandbox environment.
 func (b *Box) Start(cmd string, args...string) (id int, err error)
 
-// Stop will cancel the child context used to call the helper binary, the helper
-// binary will monitor for sigterm and will cancel the subprocess context.
+// Stop will cancel the child context used to call the helper binary,
+// the helper binary will monitor for sigterm and will cancel the
+// subprocess context.
 func (b *Box) Stop(id int) error
 
-func (b *Box) Stat(id int) (*os.ProcessState, error)
-func (b *Box) Output(id int) (io.ReaderAt, error)
+// Stat returns the status of the process with the given id.
+func (b *Box) Stat(id int) (Status, error)
+
+// Output returns a io.ReadCloser instance for reading the
+// output of the process for the given id.
+func (b *Box) Output(id int) (io.ReadCloser, error)
+
+// Cleanup will remove the sandbox temp directory
+// and all of its contents.
+func (b *Box) Cleanup()
+
+// Status indicates the current status of the process and if
+// the process has exited the exit code will be included
+type Status struct {
+ Exited bool
+ Code   int
+}
 ```
 
 **TRADEOFF:** For simplicity I have chosen to merge the stdout and stderr into a
@@ -149,10 +166,9 @@ resource control of the implementation.
 
 ### Testing
 
-Library testing will follow a similar test helper process pattern to the
-`os/exec` package itself. The testing will be minimal to account for time. The
-helper process will be tested to ensure proper propagation of the environment
-variables and stdin/stdout/stderr.
+Library testing will utilize several test binaries. The testing will be minimal
+to account for time. The helper process will be tested to ensure proper
+propagation of the environment variables and stdin/stdout/stderr.
 
 ## API
 
@@ -347,7 +363,13 @@ This is *very* insecure and should **NEVER** be done.
 ```bash
 # gRPC url config will be provided via environment variable for the exercise
 # to simplify the CLI.
-export GRCP_CONN=localhost:8080
+export GRCP_CONN=127.0.0.1:50000
+
+# Path to the certificate directory
+export CERTPATH=./certs
+
+# Certificate prefix of the user to assume the role of
+export ASSUME=it-admin
 
 # Path to the certificate directory
 export CERTPATH=./certs
