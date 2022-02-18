@@ -56,3 +56,19 @@ in the repository.
 **NOTE:** This does not include the actual artifacts like the `server` or
 `client`. Those must be built using the commands which will be documented in
 a future update.
+
+## Building the Server and Client
+
+1. Clone the repository
+1. Build `go build -o dist/ ./cmd/...` or `go install ./cmd/...`
+1. This will produce three binaries:
+   * `dist/server`
+   * `dist/client`
+1. Run `sudo ./dist/server` to start the server, or `./dist/server -h` for help
+1. Run `./dist/client <option> <cmd> <arg1> <arg2> ...` to start the client, or `./dist/client -h` for help
+
+## Re-Generating Assets
+
+1. [Install Protocol Buffers](https://grpc.io/docs/protoc-installation/)
+1. Execute `go generate ./...`
+1. Build `go build -o dist/ ./cmd/...` or `go install ./cmd/...`

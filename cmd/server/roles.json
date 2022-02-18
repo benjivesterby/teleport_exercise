@@ -1,0 +1,20 @@
+{
+    "hr": {
+        "user": {
+            "ls": true,
+            "whoami": true
+        }
+    },
+    "it": {
+        "admin": {
+            "*": true
+        },
+        "user": {
+            "cat": true,
+            "ls": true,
+            "ps": true,
+            "pwd": true,
+            "whoami": true
+        }
+    }
+}
