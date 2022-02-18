@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
+	"syscall"
 
 	"go.benjiv.com/sandbox/internal/cgroups"
 	"go.benjiv.com/sandbox/internal/iso"
@@ -32,7 +34,11 @@ func main() {
 	}
 
 	// Setup signal monitoring
-	ctx, cancel := sig.Mon(context.Background())
+	ctx, cancel := signal.NotifyContext(
+		context.Background(),
+		syscall.SIGINT,
+		syscall.SIGTERM,
+	)
 	defer cancel()
 
 	var cmd *exec.Cmd

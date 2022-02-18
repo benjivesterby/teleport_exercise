@@ -2,13 +2,13 @@ package sandbox
 
 import (
 	"bytes"
-	"context"
 	"encoding/gob"
 	"fmt"
 	"io"
 	"os"
 	"sync"
 	"testing"
+	"time"
 )
 
 //go:generate go build -o tools/reflector/ tools/reflector/reflector.go
@@ -40,9 +40,6 @@ func (i Info) String() string {
 }
 
 func Test_Reflect(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	tempdir, helper, err := deployHelper()
 	if err != nil {
 		t.Fatal(err)
@@ -53,52 +50,49 @@ func Test_Reflect(t *testing.T) {
 	})
 
 	cmd, err := createCmd(
-		ctx,
 		tempdir,
 		helper,
+		time.Minute*5,
 		"./test/bin/reflector",
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	select {
-	case <-ctx.Done():
-	case output, ok := <-cmd.output:
-		if !ok {
-			t.Fatal("channel close prematurely")
+	output, ok := <-cmd.output
+	if !ok {
+		t.Fatal("channel close prematurely")
+	}
+	defer output.Close()
+
+	d := gob.NewDecoder(output)
+	for i := 0; i < 2; i++ {
+		if i > 0 {
+			cmd.stop <- struct{}{}
 		}
-		defer output.Close()
 
-		d := gob.NewDecoder(output)
-		for i := 0; i < 2; i++ {
-			if i > 0 {
-				cmd.stop <- struct{}{}
+		info := Info{}
+		err := d.Decode(&info)
+		if err != nil {
+			if err != io.EOF {
+				t.Error(err)
 			}
-
-			info := Info{}
-			err := d.Decode(&info)
-			if err != nil {
-				if err != io.EOF {
-					t.Error(err)
-				}
-				break
-			}
-
-			if i == 0 && info.Terminated {
-				t.Fatal("first result should not be terminated")
-			}
-
-			if i == 1 && !info.Terminated {
-				t.Fatal("second result should be terminated")
-			}
-
-			if info.PID > 100 {
-				t.Fatal("improper isolation")
-			}
-
-			t.Log(info)
+			break
 		}
+
+		if i == 0 && info.Terminated {
+			t.Fatal("first result should not be terminated")
+		}
+
+		if i == 1 && !info.Terminated {
+			t.Fatal("second result should be terminated")
+		}
+
+		if info.PID > 100 {
+			t.Fatal("improper isolation")
+		}
+
+		t.Log(info)
 	}
 }
 
@@ -113,9 +107,9 @@ func Test_createCmd_parallel_read(t *testing.T) {
 	})
 
 	info, err := createCmd(
-		context.Background(),
 		tempdir,
 		helper,
+		time.Minute*5,
 		"tree",
 	)
 	if err != nil {

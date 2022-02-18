@@ -1,7 +1,6 @@
 package sandbox
 
 import (
-	"context"
 	"crypto/rand"
 	"fmt"
 	"io"
@@ -9,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"go.benjiv.com/sandbox/internal/sig"
 )
@@ -22,17 +22,17 @@ const outPrefix = "stdout-"
 // which handles the creation and execution of the
 // subprocess using the helper process.
 type cmdTracker struct {
-	id       int
-	ctx      context.Context
-	cancel   context.CancelFunc
-	command  string
-	args     []string
-	cmd      *exec.Cmd
-	stdout   string
-	status   chan Status
-	output   chan io.ReadCloser
-	stop     chan struct{}
-	finished chan int
+	id             int
+	command        string
+	args           []string
+	cmd            *exec.Cmd
+	stdout         string
+	releaseTimeout time.Duration
+	status         chan Status
+	output         chan io.ReadCloser
+	stop           chan struct{}
+	finished       chan int
+	release        <-chan time.Time
 }
 
 // cmdInfo is a type enforced wrapper for the
@@ -53,9 +53,9 @@ type cmdInfo struct {
 // This function creates the underlying mapping for the stdout
 // and stderr of the
 func createCmd(
-	ctx context.Context,
 	tempdir string,
 	helper string, // path to helper process
+	releaseTimeout time.Duration,
 	command string,
 	args ...string,
 ) (cmdInfo, error) {
@@ -68,10 +68,6 @@ func createCmd(
 		return cmdInfo{}, err
 	}
 
-	// setup the the wrappers internal context
-	// and cancel functions.
-	ctx, cancel := context.WithCancel(ctx)
-
 	outputFile := filepath.Join(
 		tempdir,
 		fmt.Sprintf("%s%d", outPrefix, id),
@@ -79,26 +75,36 @@ func createCmd(
 
 	// Initialize the helper command with
 	// the proper arguments.
-	cmd, err := creatHelperCmd(
+	cmd, err := createHelperCmd(
 		helper,
 		outputFile,
 		command,
 		args...,
 	)
 	if err != nil {
-		cancel()
 		return cmdInfo{}, err
 	}
 
 	err = cmd.Start()
 	if err != nil {
-		cancel()
 		return cmdInfo{}, err
 	}
 
-	finished := make(chan int)
+	c := &cmdTracker{
+		id:             int(id.Int64()),
+		command:        command,
+		args:           args,
+		cmd:            cmd,
+		stdout:         outputFile,
+		status:         make(chan Status),
+		output:         make(chan io.ReadCloser),
+		stop:           make(chan struct{}),
+		finished:       make(chan int),
+		releaseTimeout: releaseTimeout,
+	}
+
 	go func() {
-		defer close(finished)
+		defer close(c.finished)
 
 		// NOTE: I am purposely ignoring this
 		// error since stderr and stdout are
@@ -113,9 +119,11 @@ func createCmd(
 
 		for {
 			select {
-			case <-ctx.Done():
+			// Adhere to release timer when finished.
+			case <-c.release:
 				return
-			case finished <- exitcode:
+			// Push the exit code to the finished channel.
+			case c.finished <- exitcode:
 			}
 		}
 	}()
@@ -123,36 +131,35 @@ func createCmd(
 	// Create the command tracker instance
 	// and start the internal goroutine for
 	// managing data access and the command
-	return (&cmdTracker{
-		id:       int(id.Int64()),
-		ctx:      ctx,
-		cancel:   cancel,
-		command:  command,
-		args:     args,
-		cmd:      cmd,
-		stdout:   outputFile,
-		status:   make(chan Status),
-		output:   make(chan io.ReadCloser),
-		stop:     make(chan struct{}),
-		finished: finished,
-	}).init()
+	return c.init()
 }
 
 // init starts an routine for managing and acessing the
 // command instance
 func (c *cmdTracker) init() (cmdInfo, error) {
 	go func() {
+		var timeout <-chan time.Time
 		exited := false
 		exitcode := 0
 		finished := c.finished
 
+		defer func() {
+			close(c.status)
+			close(c.output)
+
+			// Cleanup the output file
+			// Error can be safely ignored since
+			// the sandbox removes the complete temp
+			// directory.
+			// TODO: use `go.devnw.com/event` library instead
+			// to capture errors from routines in
+			// the future.
+			_ = os.Remove(c.stdout)
+		}()
+
 		for {
 			select {
-			case <-c.ctx.Done():
-				// NOTE: I am purposely ignoring this
-				// error as it is not critical to the
-				// operation of the command.
-				_ = sig.Term(c.cmd)
+			case <-timeout:
 				return
 			case <-c.stop:
 				if exited {
@@ -162,22 +169,29 @@ func (c *cmdTracker) init() (cmdInfo, error) {
 				// NOTE: I am purposely ignoring this
 				// error as it is not critical to the
 				// operation of the command.
+				// TODO: use `go.devnw.com/event` library instead
+				// to capture errors from routines in
+				// the future.
 				_ = sig.Term(c.cmd)
-			case exitCode, ok := <-finished:
-				if !ok {
-					return
-				}
-
+			case exitCode := <-finished:
 				exited = true
 				exitcode = exitCode
+
+				// Setup timer to release resources
+				timer := time.NewTimer(c.releaseTimeout)
+				//nolint:gocritic
+				defer timer.Stop()
+
+				timeout = timer.C
 
 				// nil out the channel so this select
 				// statement will continue to read
 				// from the finished channel.
 				finished = nil
 			case c.status <- Status{
-				Exited: exited,
-				Code:   exitcode,
+				Command: c.command,
+				Exited:  exited,
+				Code:    exitcode,
 			}:
 			case c.output <- c.reader(c.stdout):
 			}
@@ -211,7 +225,7 @@ func (c *cmdTracker) reader(file string) io.ReadCloser {
 // createHelperCmd creates a new command instance for the
 // helper process, merges the stdout and stderr of the
 // command, and returns the command instance.
-func creatHelperCmd(
+func createHelperCmd(
 	path string,
 	stdout string,
 	command string,

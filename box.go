@@ -5,22 +5,29 @@ import (
 	"errors"
 	"io"
 	"os"
-	"path/filepath"
 	"sync"
+	"time"
 )
 
 // New returns a sandbox environment after creating the parent
 // cgroups which manages the processes within the library.
-func New(ctx context.Context) (*Box, error) {
-	tempDir, _, err := deployHelper()
+//
+// The releaseTimeout `time.Duration` is the amount of time the
+// sandbox environment will retain a process's information,
+// after process execution completes, in memory and on disk
+// before it's released.
+func New(ctx context.Context, releaseTimeout time.Duration) (*Box, error) {
+	tempDir, helper, err := deployHelper()
 	if err != nil {
 		return nil, err
 	}
 
 	return &Box{
-		ctx:     ctx,
-		tempDir: tempDir,
-		catalog: make(map[int]cmdInfo),
+		ctx:            ctx,
+		tempDir:        tempDir,
+		helperPath:     helper,
+		catalog:        make(map[int]cmdInfo),
+		releaseTimeout: releaseTimeout,
 	}, nil
 }
 
@@ -28,34 +35,28 @@ func New(ctx context.Context) (*Box, error) {
 // Each instance of Box has its own isolated cgroup and is
 // responsible for creating subprocesses using the helper binary.
 type Box struct {
-	ctx       context.Context
-	tempDir   string
-	catalog   map[int]cmdInfo
-	catalogMu sync.RWMutex
-	boxWg     sync.WaitGroup
+	ctx            context.Context
+	tempDir        string
+	helperPath     string
+	catalog        map[int]cmdInfo
+	catalogMu      sync.RWMutex
+	releaseTimeout time.Duration
 }
 
 // Cleanup will remove the sandbox temp directory
 // and all of its contents.
 func (b *Box) Cleanup() {
+	var boxWg sync.WaitGroup
 	b.catalogMu.RLock()
 	defer b.catalogMu.RUnlock()
 
 	// Add all processes to the wait group
-	b.boxWg.Add(len(b.catalog))
+	boxWg.Add(len(b.catalog))
 	for _, info := range b.catalog {
 		go func(info cmdInfo) {
-			defer b.boxWg.Done()
-
-			// handle already closed channels
-			// TODO: Fix the race here: Since finished would be
-			// after the close and not in a defer a panic will
-			// ignore the finished signal
-			// nolint:errcheck
-			defer recover()
+			defer boxWg.Done()
 			for {
 				select {
-				case <-b.ctx.Done():
 				case info.stop <- struct{}{}:
 				case s, ok := <-info.status:
 					if !ok || s.Exited {
@@ -67,7 +68,7 @@ func (b *Box) Cleanup() {
 	}
 
 	// Wait for all processes to exit
-	b.boxWg.Wait()
+	boxWg.Wait()
 
 	// Cleanup the temp directory
 	os.RemoveAll(b.tempDir)
@@ -78,9 +79,9 @@ func (b *Box) Start(cmd string, args ...string) (id int, err error) {
 	// Create and execute the command passing in
 	// the context, temp directory, and the helper binary path.
 	info, err := createCmd(
-		b.ctx,
 		b.tempDir,
-		filepath.Join(b.tempDir, helperCmd),
+		b.helperPath,
+		b.releaseTimeout,
 		cmd,
 		args...,
 	)
@@ -108,13 +109,25 @@ func (b *Box) Stop(id int) error {
 		return err
 	}
 
-	// Stop the process
-	// NOTE: I am NOT closing the stop channel here.
-	// This is to ensure the select in the cmdTracker
-	// is not constantly taking the `<-info.stop` case
-	// statement since the `select` statement is
-	// stochastic in its execution.
-	info.stop <- struct{}{}
+	select {
+	case <-b.ctx.Done():
+		return b.ctx.Err()
+	case status, ok := <-info.status:
+		if !ok {
+			b.rmProc(id)
+			return ErrProcessNotFound
+		}
+
+		if !status.Exited {
+			// Stop the process
+			// NOTE: I am NOT closing the stop channel here.
+			// This is to ensure the select in the cmdTracker
+			// is not constantly taking the `<-info.stop` case
+			// statement since the `select` statement is
+			// stochastic in its execution.
+			info.stop <- struct{}{}
+		}
+	}
 
 	return nil
 }
@@ -122,8 +135,9 @@ func (b *Box) Stop(id int) error {
 // Status indicates the current status of the process and if
 // the process has exited the exit code will be included
 type Status struct {
-	Exited bool
-	Code   int
+	Command string
+	Exited  bool
+	Code    int
 }
 
 // Stat returns the status of the process with the given id.
@@ -140,9 +154,7 @@ func (b *Box) Stat(id int) (Status, error) {
 		return Status{}, b.ctx.Err()
 	case status, ok := <-info.status:
 		if !ok {
-			// TODO: A better error here perhaps. If this channel is closed,
-			// then the lib caller has exited and the process has been cleaned
-			// up.
+			b.rmProc(id)
 			return Status{}, ErrProcessNotFound
 		}
 
@@ -165,9 +177,7 @@ func (b *Box) Output(id int) (io.ReadCloser, error) {
 		return nil, b.ctx.Err()
 	case output, ok := <-info.output:
 		if !ok {
-			// TODO: A better error here perhaps. If this channel is closed,
-			// then the lib caller has exited and the process has been cleaned
-			// up.
+			b.rmProc(id)
 			return nil, ErrProcessNotFound
 		}
 
@@ -176,6 +186,16 @@ func (b *Box) Output(id int) (io.ReadCloser, error) {
 }
 
 var ErrProcessNotFound = errors.New("process not found")
+
+// rmProc removes the process with the given id from the catalog.
+func (b *Box) rmProc(id int) {
+	// Lock the catalog
+	b.catalogMu.Lock()
+	defer b.catalogMu.Unlock()
+
+	// Remove the process from the catalog
+	delete(b.catalog, id)
+}
 
 // getInfo will return the cmdInfo for the given id.
 // This method is split out to allow for testing as well

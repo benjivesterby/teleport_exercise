@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"go.benjiv.com/sandbox"
-	"go.benjiv.com/sandbox/internal/sig"
 )
 
 const (
@@ -21,10 +23,14 @@ func main() {
 		os.Exit(exitcode)
 	}()
 
-	ctx, cancel := sig.Mon(context.Background())
+	ctx, cancel := signal.NotifyContext(
+		context.Background(),
+		syscall.SIGINT,
+		syscall.SIGTERM,
+	)
 	defer cancel()
 
-	box, err := sandbox.New(ctx)
+	box, err := sandbox.New(ctx, time.Minute*5)
 	if err != nil {
 		panic(err)
 	}

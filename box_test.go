@@ -6,13 +6,14 @@ import (
 	"io"
 	"os"
 	"testing"
+	"time"
 )
 
 func Test_TempDir(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	b, err := New(ctx)
+	b, err := New(ctx, time.Minute*5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +34,7 @@ func Test_Box_Start_Output(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	box, err := New(ctx)
+	box, err := New(ctx, time.Minute*5)
 	if err != nil {
 		t.Fatal(err)
 	}

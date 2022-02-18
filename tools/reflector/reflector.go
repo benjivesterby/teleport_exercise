@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/gob"
 	"os"
-
-	"go.benjiv.com/sandbox/internal/sig"
+	"os/signal"
+	"syscall"
 )
 
 func init() {
@@ -20,7 +20,11 @@ type Info struct {
 }
 
 func main() {
-	ctx, cancel := sig.Mon(context.Background())
+	ctx, cancel := signal.NotifyContext(
+		context.Background(),
+		syscall.SIGINT,
+		syscall.SIGTERM,
+	)
 	defer cancel()
 
 	e := gob.NewEncoder(os.Stdout)
